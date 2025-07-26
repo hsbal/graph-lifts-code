@@ -1,0 +1,83 @@
+import networkx as nx  
+import numpy as np
+from scipy.sparse import csr_matrix 
+from scipy.sparse.linalg import expm_multiply
+from collections import deque
+import random
+
+def build_HL2(G):
+    top = {f"{v}_top" for v in G.nodes()}
+    bottom = {f"{v}_bot" for v in G.nodes()}
+    bipartite = nx.Graph()
+    bipartite.add_nodes_from(top, bipartite=0)
+    bipartite.add_nodes_from(bottom, bipartite=1)
+
+    for u, v in G.edges():
+        bipartite.add_edge(f"{u}_top", f"{v}_bot")
+        bipartite.add_edge(f"{v}_top", f"{u}_bot")
+
+    return nx.line_graph(bipartite)
+
+
+def build_HL2_prime_tower(base_graph, levels, max_nodes=50000):
+    G = base_graph.copy()
+    for _ in range(levels):
+        G = build_HL2(G)
+        if G.number_of_nodes() > max_nodes:
+            print(f"Warning: Graph size {G.number_of_nodes()} exceeds {max_nodes}, truncating.")
+            break
+    return G
+
+def bfs_connected_subgraph(G, start_node, max_nodes=7500):
+    if start_node not in G.nodes():
+        raise ValueError(f"Start node {start_node} not in graph")
+    visited = set()
+    queue = deque([start_node])
+    while queue and len(visited) < min(max_nodes, G.number_of_nodes()):
+        node = queue.popleft()
+        if node not in visited:
+            visited.add(node)
+            neighbors = list(G.neighbors(node))
+            random.shuffle(neighbors)
+            queue.extend(n for n in neighbors if n not in visited)
+    return G.subgraph(visited).copy()
+
+def simulate_unitary_return_krylov_with_index(G, node_label, T=120, steps=600):
+    if node_label not in G.nodes():
+        raise ValueError(f"Node {node_label} not in graph")
+    node_list = list(G.nodes())
+    index_map = {node: i for i, node in enumerate(node_list)}
+    node_index = index_map[node_label]
+    A = nx.to_scipy_sparse_array(G, nodelist=node_list, format="csr", dtype=complex)
+    psi0 = np.zeros(len(G), dtype=complex)
+    psi0[node_index] = 1.0
+    times = np.linspace(0, T, steps)
+    returns = np.array([abs(expm_multiply(-1j * A * t, psi0)[node_index])**2 for t in times])
+    return times, returns
+      import networkx as nx
+import matplotlib.pyplot as plt 
+
+# Create a complete graph with 4 nodes
+G = nx.random_regular_graph(3, 80)
+
+sub = bfs_connected_subgraph(G, list(G.nodes())[0])
+times, returns = simulate_unitary_return_krylov_with_index(sub, list(sub.nodes())[0], T=60, steps=400)
+plt.plot(times, returns)
+plt.show()
+
+
+for n in range (1, 4):
+    # Build the prime tower
+    tower = build_HL2_prime_tower(G, n)
+
+    # Print the nodes in the tower to verify it has nodes
+    #print("Nodes in the tower:", list(tower.nodes()))
+
+    # Ensure tower has nodes before proceeding
+    if len(list(tower.nodes())) > 0:
+        sub = bfs_connected_subgraph(tower, list(tower.nodes())[0])
+        times, returns = simulate_unitary_return_krylov_with_index(sub, list(sub.nodes())[0], T=60, steps=400)
+        plt.plot(times, returns)
+        plt.show() 
+    else:
+        print("The tower has no nodes.")
