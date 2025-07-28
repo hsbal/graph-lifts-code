@@ -1,0 +1,107 @@
+
+import networkx as nx
+import numpy as np
+from scipy.optimize import linprog
+
+# Step 1: Build HL₂(G) from a base graph G and dummy ordering
+def build_HL2_explicit(G, phi):
+    edge_vertices = []
+    for u, v in G.edges():
+        if phi[u] > phi[v]:
+            edge_vertices.append((u, v))
+        elif phi[v] > phi[u]:
+            edge_vertices.append((v, u))
+    HL2 = nx.Graph()
+    HL2.add_nodes_from(edge_vertices)
+    for (u, v1) in edge_vertices:
+        for (v2, w) in edge_vertices:
+            if v1 == v2 and u != w:
+                HL2.add_edge((u, v1), (v2, w))
+    return HL2
+
+# Step 2: Generate Label-Cover with ε noise and planted labeling
+def generate_label_cover_fixed(G, k, epsilon, seed_val=42):
+    rng = np.random.default_rng(seed_val)
+    nodes = list(G.nodes())
+    labeling = {v: rng.integers(0, k) for v in nodes}
+    constraints = {}
+    for u, v in G.edges():
+        if rng.random() < epsilon:
+            pi = list(rng.permutation(np.arange(k)))
+        else:
+            shift = (labeling[v] - labeling[u]) % k
+            pi = [(i + shift) % k for i in range(k)]
+        constraints[(u, v)] = pi
+        constraints[(v, u)] = [pi.index(i) for i in range(k)]
+    return labeling, constraints
+
+# Step 3: Evaluate value of labeling (safe version)
+def evaluate_val_G(G, labeling, constraints):
+    satisfied = 0
+    for (u, v) in G.edges():
+        if u in labeling and v in labeling:
+            pi = constraints[(u, v)]
+            if pi[labeling[u]] == labeling[v]:
+                satisfied += 1
+    return satisfied / G.number_of_edges()
+
+# Step 4: LP relaxation and majority decoding
+def approximate_lp_phi(HL2, constraints, k):
+    node_list = list(HL2.nodes())
+    n = len(node_list)
+    num_vars = n * k
+    c = np.zeros(num_vars)
+
+    A_eq, b_eq = [], []
+    for i in range(n):
+        constraint = np.zeros(num_vars)
+        for l in range(k):
+            constraint[i * k + l] = 1
+        A_eq.append(constraint)
+        b_eq.append(1)
+
+    bounds = [(0, 1) for _ in range(num_vars)]
+
+    result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
+
+    Phi = {}
+    if result.success:
+        x = result.x
+        for i in range(n):
+            label_vals = x[i * k:(i + 1) * k]
+            best_label = int(np.argmax(label_vals))
+            Phi[node_list[i]] = best_label
+    return Phi
+
+# Step 5: Majority decode with fallback
+def majority_decode(HL2, phi, G, k):
+    votes = {v: [] for v in G.nodes()}
+    for (u, v), label in phi.items():
+        votes[v].append(label)
+    decoded = {}
+    for v in G.nodes():
+        if votes[v]:
+            decoded[v] = max(set(votes[v]), key=votes[v].count)
+        else:
+            decoded[v] = np.random.randint(k)
+    return decoded
+
+# Step 6: Run the experiment
+n, d, k, epsilon, seeds = 100, 7, 5, 0.49, 5
+results = []
+
+for seed in range(seeds):
+    G = nx.random_regular_graph(d, n, seed=seed)
+    phi = {v: i for i, v in enumerate(G.nodes())}
+    HL2 = build_HL2_explicit(G, phi)
+    labeling, constraints = generate_label_cover_fixed(G, k, epsilon, seed_val=seed)
+    val_planted = evaluate_val_G(G, labeling, constraints)
+    lp_phi = approximate_lp_phi(HL2, constraints, k)
+    decoded = majority_decode(HL2, lp_phi, G, k)
+    val_decoded = evaluate_val_G(G, decoded, constraints)
+    results.append((val_planted, val_decoded))
+
+# Show the mean planted and decoded values
+print(np.round(np.mean(results, axis=0), 4))
+
+[0.6029 0.2103]
