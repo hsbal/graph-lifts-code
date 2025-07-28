@@ -2,22 +2,25 @@
 import networkx as nx
 import numpy as np
 from scipy.optimize import linprog
-
 # Step 1: Build HL₂(G) from a base graph G and dummy ordering
+
+
 def build_HL2_explicit(G, phi):
     edge_vertices = []
     for u, v in G.edges():
-        if phi[u] > phi[v]:
+        if phi[u] < phi[v]:
             edge_vertices.append((u, v))
-        elif phi[v] > phi[u]:
+        else:
             edge_vertices.append((v, u))
     HL2 = nx.Graph()
     HL2.add_nodes_from(edge_vertices)
-    for (u, v1) in edge_vertices:
-        for (v2, w) in edge_vertices:
-            if v1 == v2 and u != w:
-                HL2.add_edge((u, v1), (v2, w))
+    for idx1, (u1, v1) in enumerate(edge_vertices):
+        for idx2 in range(idx1 + 1, len(edge_vertices)):  # Avoid duplicates/self-loops
+            u2, v2 = edge_vertices[idx2]
+            if (u1 == u2 and v1 != v2) or (v1 == v2 and u1 != u2):
+                HL2.add_edge((u1, v1), (u2, v2))
     return HL2
+
 
 # Step 2: Generate Label-Cover with ε noise and planted labeling
 def generate_label_cover_fixed(G, k, epsilon, seed_val=42):
