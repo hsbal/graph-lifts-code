@@ -1,10 +1,10 @@
-
-import networkx as nx
+ import networkx as nx
 import numpy as np
 from scipy.optimize import linprog
+from collections import defaultdict
+import random
+
 # Step 1: Build HL₂(G) from a base graph G and dummy ordering
-
-
 def build_HL2_explicit(G, phi):
     edge_vertices = []
     for u, v in G.edges():
@@ -21,7 +21,6 @@ def build_HL2_explicit(G, phi):
                 HL2.add_edge((u1, v1), (u2, v2))
     return HL2
 
-
 # Step 2: Generate Label-Cover with ε noise and planted labeling
 def generate_label_cover_fixed(G, k, epsilon, seed_val=42):
     rng = np.random.default_rng(seed_val)
@@ -35,7 +34,11 @@ def generate_label_cover_fixed(G, k, epsilon, seed_val=42):
             shift = (labeling[v] - labeling[u]) % k
             pi = [(i + shift) % k for i in range(k)]
         constraints[(u, v)] = pi
-        constraints[(v, u)] = [pi.index(i) for i in range(k)]
+        # Inverse for (v,u)
+        inverse_pi = [0] * k
+        for i in range(k):
+            inverse_pi[pi[i]] = i
+        constraints[(v, u)] = inverse_pi
     return labeling, constraints
 
 # Step 3: Evaluate value of labeling (safe version)
@@ -48,20 +51,57 @@ def evaluate_val_G(G, labeling, constraints):
                 satisfied += 1
     return satisfied / G.number_of_edges()
 
-# Step 4: LP relaxation and majority decoding
-def approximate_lp_phi(HL2, constraints, k):
+# Step 4: LP relaxation with consistency and satisfaction constraints
+def approximate_lp_phi(HL2, constraints, k, G):
     node_list = list(HL2.nodes())
     n = len(node_list)
     num_vars = n * k
-    c = np.zeros(num_vars)
+    c = np.zeros(num_vars)  # Feasibility problem
 
-    A_eq, b_eq = [], []
+    A_eq = []
+    b_eq = []
+
+    # Sum-to-1 per HL2 node (distribution over labels for head)
     for i in range(n):
         constraint = np.zeros(num_vars)
         for l in range(k):
             constraint[i * k + l] = 1
         A_eq.append(constraint)
         b_eq.append(1)
+
+    # Build head groups: for each G-vertex v, list of HL2 indices where head=v
+    head_groups = defaultdict(list)
+    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
+    for idx, (u, v) in enumerate(node_list):
+        head_groups[v].append(idx)
+
+    # Add consistency equalities for shared heads (same distribution for each v)
+    for v, group in head_groups.items():
+        if len(group) > 1:
+            rep = group[0]
+            for other in group[1:]:
+                for l in range(k):
+                    const = np.zeros(num_vars)
+                    const[rep * k + l] = 1
+                    const[other * k + l] = -1
+                    A_eq.append(const)
+                    b_eq.append(0)
+
+    # Add satisfaction equalities using constraints
+    for u, v in G.edges():
+        if (u, v) in constraints:
+            pi = constraints[(u, v)]  # pi[l] = m means if label_u = l, then label_v = m
+            if head_groups[u] and head_groups[v]:
+                rep_u = head_groups[u][0]
+                rep_v = head_groups[v][0]
+                for m in range(k):
+                    const = np.zeros(num_vars)
+                    const[rep_v * k + m] = 1  # x_v,m
+                    for l in range(k):
+                        if pi[l] == m:
+                            const[rep_u * k + l] = -1  # - sum_{l: pi(l)=m} x_u,l
+                    A_eq.append(const)
+                    b_eq.append(0)
 
     bounds = [(0, 1) for _ in range(num_vars)]
 
@@ -74,6 +114,11 @@ def approximate_lp_phi(HL2, constraints, k):
             label_vals = x[i * k:(i + 1) * k]
             best_label = int(np.argmax(label_vals))
             Phi[node_list[i]] = best_label
+    else:
+        # If infeasible, assign random labels
+        for i in range(n):
+            Phi[node_list[i]] = random.randint(0, k-1)
+
     return Phi
 
 # Step 5: Majority decode with fallback
@@ -99,12 +144,10 @@ for seed in range(seeds):
     HL2 = build_HL2_explicit(G, phi)
     labeling, constraints = generate_label_cover_fixed(G, k, epsilon, seed_val=seed)
     val_planted = evaluate_val_G(G, labeling, constraints)
-    lp_phi = approximate_lp_phi(HL2, constraints, k)
+    lp_phi = approximate_lp_phi(HL2, constraints, k, G)  # Pass G as well
     decoded = majority_decode(HL2, lp_phi, G, k)
     val_decoded = evaluate_val_G(G, decoded, constraints)
     results.append((val_planted, val_decoded))
 
 # Show the mean planted and decoded values
 print(np.round(np.mean(results, axis=0), 4))
-
-[0.6029 0.2103]
