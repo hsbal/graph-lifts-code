@@ -89,37 +89,14 @@ def run_lift_experiment(base_graph, name, max_level=3):
         if level < max_level:
             G = build_HL2(G)
     return pd.DataFrame(results)
+def approximate_log_coherence_number(A, k=5, threshold=1e-3):
+    _, vecs = np.linalg.eigh(A)
+    top_vecs = vecs[:, -k:]
+    log_ranks = []
 
-# === Main: Run for K4 and 3-regular ===
-if __name__ == "__main__":
-    # Create graphs
-    k4 = nx.complete_graph(4)
-    r3 = nx.random_regular_graph(3, 20, seed=42)
+    for v in top_vecs.T:
+        support = np.sum(np.abs(v) > threshold)
+        log_rank = np.log2(support + 1e-12)  # Prevent log2(0)
+        log_ranks.append(log_rank)
 
-    # Run experiments
-    df_k4 = run_lift_experiment(k4, "K4")
-    df_r3 = run_lift_experiment(r3, "3-regular (n=20)")
-
-    # Save as CSV
-    df_k4.to_csv("k4_coherence.csv", index=False)
-    df_r3.to_csv("r3_coherence.csv", index=False)
-
-    # Print summaries
-    print("=== K4 Coherence Metrics ===")
-    print(df_k4)
-    print("\n=== 3-Regular Coherence Metrics ===")
-    print(df_r3)
-
-    # Export LaTeX tables
-    def to_latex(df, caption):
-        return df.to_latex(index=False, float_format="%.4f",
-                           caption=caption,
-                           label="tab:" + caption.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", ""))
-
-    with open("k4_table.tex", "w") as f:
-        f.write(to_latex(df_k4, "Coherence Metrics for K4 (Corrected)"))
-
-    with open("r3_table.tex", "w") as f:
-        f.write(to_latex(df_r3, "Coherence Metrics for 3-Regular Graph (Corrected)"))
-
-    print("\nLaTeX tables saved as k4_table.tex and r3_table.tex.")
+    return np.mean(log_ranks)
