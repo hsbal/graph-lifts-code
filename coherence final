@@ -5,7 +5,7 @@ from scipy.sparse.linalg import expm_multiply
 from collections import deque
 import random
 
-# === HL′₂ lift construction ===
+# === HL′₂ symmetric lift ===
 def build_HL2(G):
     top = {f"{v}_top" for v in G.nodes()}
     bottom = {f"{v}_bot" for v in G.nodes()}
@@ -25,14 +25,15 @@ def purity(rho):
     return np.trace(rho @ rho).real
 
 def rel_entropy_coherence(rho):
-    rho_diag = np.diag(np.diag(rho))
-    evals = np.linalg.eigvalsh(rho)
-    evals_diag = np.diag(rho)
-    return np.sum(evals * np.log2(evals + 1e-12)) - np.sum(evals_diag * np.log2(evals_diag + 1e-12))
+    evals_rho = np.clip(np.linalg.eigvalsh(rho), 0, None)  # Safe eigenvalues
+    evals_diag = np.clip(np.diag(rho).real, 0, None)       # Diagonal entries (probabilities)
+    S_rho = -np.sum(evals_rho * np.log2(evals_rho + 1e-12))
+    S_diag = -np.sum(evals_diag * np.log2(evals_diag + 1e-12))
+    return S_diag - S_rho
 
 def coherence_metrics(A, k=5):
     vals, vecs = np.linalg.eigh(A)
-    top_vecs = vecs[:, -k:]
+    top_vecs = vecs[:, -k:]  # Top-k eigenvectors
     n = A.shape[0]
     rho = np.zeros((n, n), dtype=complex)
     iprs = []
@@ -42,7 +43,7 @@ def coherence_metrics(A, k=5):
     rho /= k
     return np.mean(iprs), purity(rho), rel_entropy_coherence(rho)
 
-# === Continuous-time quantum walk return probability ===
+# === Return probability simulation ===
 def bfs_subgraph(G, start_node, max_nodes=2000):
     visited, queue = set(), deque([start_node])
     while queue and len(visited) < max_nodes:
@@ -54,7 +55,7 @@ def bfs_subgraph(G, start_node, max_nodes=2000):
             queue.extend(n for n in neighbors if n not in visited)
     return G.subgraph(visited).copy()
 
-def simulate_return(G, node, T=30, steps=100):
+def simulate_return(G, node, T=10, steps=50):  # Lightweight simulation
     node_list = list(G.nodes())
     index_map = {v: i for i, v in enumerate(node_list)}
     idx = index_map[node]
@@ -65,7 +66,7 @@ def simulate_return(G, node, T=30, steps=100):
     returns = np.array([abs(expm_multiply(-1j * A * t, psi0)[idx])**2 for t in times])
     return np.mean(returns), np.max(returns), np.std(returns)
 
-# === Run coherence and return metrics over HL′₂^r ===
+# === Experiment loop ===
 def run_lift_experiment(base_graph, name, max_level=3):
     G = base_graph.copy()
     results = []
@@ -89,31 +90,36 @@ def run_lift_experiment(base_graph, name, max_level=3):
             G = build_HL2(G)
     return pd.DataFrame(results)
 
-# === Run experiments for K4 and random 3-regular ===
-k4 = nx.complete_graph(4)
-r3 = nx.random_regular_graph(3, 20, seed=42)
+# === Main: Run for K4 and 3-regular ===
+if __name__ == "__main__":
+    # Create graphs
+    k4 = nx.complete_graph(4)
+    r3 = nx.random_regular_graph(3, 20, seed=42)
 
-df_k4 = run_lift_experiment(k4, "K4")
-df_r3 = run_lift_experiment(r3, "3-regular (n=20)")
+    # Run experiments
+    df_k4 = run_lift_experiment(k4, "K4")
+    df_r3 = run_lift_experiment(r3, "3-regular (n=20)")
 
-# === Save results ===
-df_k4.to_csv("k4_coherence.csv", index=False)
-df_r3.to_csv("r3_coherence.csv", index=False)
+    # Save as CSV
+    df_k4.to_csv("k4_coherence.csv", index=False)
+    df_r3.to_csv("r3_coherence.csv", index=False)
 
-print("=== K4 Coherence Metrics ===")
-print(df_k4)
+    # Print summaries
+    print("=== K4 Coherence Metrics ===")
+    print(df_k4)
+    print("\n=== 3-Regular Coherence Metrics ===")
+    print(df_r3)
 
-print("\n=== 3-Regular Coherence Metrics ===")
-print(df_r3)
+    # Export LaTeX tables
+    def to_latex(df, caption):
+        return df.to_latex(index=False, float_format="%.4f",
+                           caption=caption,
+                           label="tab:" + caption.lower().replace(" ", "_").replace("(", "").replace(")", "").replace("-", ""))
 
-# === Optional: Export to LaTeX tables ===
-def to_latex(df, caption):
-    return df.to_latex(index=False, float_format="%.4f", caption=caption, label="tab:" + caption.lower().replace(" ", "_"))
+    with open("k4_table.tex", "w") as f:
+        f.write(to_latex(df_k4, "Coherence Metrics for K4 (Corrected)"))
 
-with open("k4_table.tex", "w") as f:
-    f.write(to_latex(df_k4, "Coherence Metrics for K4"))
+    with open("r3_table.tex", "w") as f:
+        f.write(to_latex(df_r3, "Coherence Metrics for 3-Regular Graph (Corrected)"))
 
-with open("r3_table.tex", "w") as f:
-    f.write(to_latex(df_r3, "Coherence Metrics for 3-Regular Graph"))
-
-print("\nLaTeX tables saved as k4_table.tex and r3_table.tex.")
+    print("\nLaTeX tables saved as k4_table.tex and r3_table.tex.")
