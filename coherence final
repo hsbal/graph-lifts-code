@@ -1,0 +1,119 @@
+import networkx as nx
+import numpy as np
+import pandas as pd
+from scipy.sparse.linalg import expm_multiply
+from collections import deque
+import random
+
+# === HL′₂ lift construction ===
+def build_HL2(G):
+    top = {f"{v}_top" for v in G.nodes()}
+    bottom = {f"{v}_bot" for v in G.nodes()}
+    B = nx.Graph()
+    B.add_nodes_from(top, bipartite=0)
+    B.add_nodes_from(bottom, bipartite=1)
+    for u, v in G.edges():
+        B.add_edge(f"{u}_top", f"{v}_bot")
+        B.add_edge(f"{v}_top", f"{u}_bot")
+    return nx.line_graph(B)
+
+# === Quantum coherence metrics ===
+def ipr(psi):
+    return np.sum(np.abs(psi)**4)
+
+def purity(rho):
+    return np.trace(rho @ rho).real
+
+def rel_entropy_coherence(rho):
+    rho_diag = np.diag(np.diag(rho))
+    evals = np.linalg.eigvalsh(rho)
+    evals_diag = np.diag(rho)
+    return np.sum(evals * np.log2(evals + 1e-12)) - np.sum(evals_diag * np.log2(evals_diag + 1e-12))
+
+def coherence_metrics(A, k=5):
+    vals, vecs = np.linalg.eigh(A)
+    top_vecs = vecs[:, -k:]
+    n = A.shape[0]
+    rho = np.zeros((n, n), dtype=complex)
+    iprs = []
+    for v in top_vecs.T:
+        rho += np.outer(v, v.conj())
+        iprs.append(ipr(v))
+    rho /= k
+    return np.mean(iprs), purity(rho), rel_entropy_coherence(rho)
+
+# === Continuous-time quantum walk return probability ===
+def bfs_subgraph(G, start_node, max_nodes=2000):
+    visited, queue = set(), deque([start_node])
+    while queue and len(visited) < max_nodes:
+        node = queue.popleft()
+        if node not in visited:
+            visited.add(node)
+            neighbors = list(G.neighbors(node))
+            random.shuffle(neighbors)
+            queue.extend(n for n in neighbors if n not in visited)
+    return G.subgraph(visited).copy()
+
+def simulate_return(G, node, T=30, steps=100):
+    node_list = list(G.nodes())
+    index_map = {v: i for i, v in enumerate(node_list)}
+    idx = index_map[node]
+    A = nx.to_scipy_sparse_array(G, nodelist=node_list, format='csr', dtype=complex)
+    psi0 = np.zeros(len(G), dtype=complex)
+    psi0[idx] = 1.0
+    times = np.linspace(0, T, steps)
+    returns = np.array([abs(expm_multiply(-1j * A * t, psi0)[idx])**2 for t in times])
+    return np.mean(returns), np.max(returns), np.std(returns)
+
+# === Run coherence and return metrics over HL′₂^r ===
+def run_lift_experiment(base_graph, name, max_level=3):
+    G = base_graph.copy()
+    results = []
+    for level in range(0, max_level + 1):
+        A = nx.to_numpy_array(G)
+        avg_ipr, avg_purity, rel_ent = coherence_metrics(A)
+        sub = bfs_subgraph(G, list(G.nodes())[0], max_nodes=1500)
+        mean_ret, peak_ret, std_ret = simulate_return(sub, list(sub.nodes())[0])
+        results.append({
+            "graph": name,
+            "lift_level": level,
+            "nodes": G.number_of_nodes(),
+            "avg_ipr": avg_ipr,
+            "avg_purity": avg_purity,
+            "avg_rel_entropy": rel_ent,
+            "mean_return": mean_ret,
+            "peak_return": peak_ret,
+            "std_return": std_ret
+        })
+        if level < max_level:
+            G = build_HL2(G)
+    return pd.DataFrame(results)
+
+# === Run experiments for K4 and random 3-regular ===
+k4 = nx.complete_graph(4)
+r3 = nx.random_regular_graph(3, 20, seed=42)
+
+df_k4 = run_lift_experiment(k4, "K4")
+df_r3 = run_lift_experiment(r3, "3-regular (n=20)")
+
+# === Save results ===
+df_k4.to_csv("k4_coherence.csv", index=False)
+df_r3.to_csv("r3_coherence.csv", index=False)
+
+print("=== K4 Coherence Metrics ===")
+print(df_k4)
+
+print("\n=== 3-Regular Coherence Metrics ===")
+print(df_r3)
+
+# === Optional: Export to LaTeX tables ===
+def to_latex(df, caption):
+    return df.to_latex(index=False, float_format="%.4f", caption=caption, label="tab:" + caption.lower().replace(" ", "_"))
+
+with open("k4_table.tex", "w") as f:
+    f.write(to_latex(df_k4, "Coherence Metrics for K4"))
+
+with open("r3_table.tex", "w") as f:
+    f.write(to_latex(df_r3, "Coherence Metrics for 3-Regular Graph"))
+
+print("\nLaTeX tables saved as k4_table.tex and r3_table.tex.")
