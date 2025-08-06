@@ -1,4 +1,4 @@
- import networkx as nx
+import networkx as nx
 import numpy as np
 from scipy.optimize import linprog
 from collections import defaultdict
@@ -56,12 +56,12 @@ def approximate_lp_phi(HL2, constraints, k, G):
     node_list = list(HL2.nodes())
     n = len(node_list)
     num_vars = n * k
-    c = np.zeros(num_vars)  # Feasibility problem
-
+    c = np.zeros(num_vars)  # feasibility problem (no optimization)
+    
     A_eq = []
     b_eq = []
 
-    # Sum-to-1 per HL2 node (distribution over labels for head)
+    # Sum-to-1 for each HL2 node
     for i in range(n):
         constraint = np.zeros(num_vars)
         for l in range(k):
@@ -69,57 +69,70 @@ def approximate_lp_phi(HL2, constraints, k, G):
         A_eq.append(constraint)
         b_eq.append(1)
 
-    # Build head groups: for each G-vertex v, list of HL2 indices where head=v
+    # Build head and tail groups
     head_groups = defaultdict(list)
-    node_to_idx = {node: idx for idx, node in enumerate(node_list)}
+    tail_groups = defaultdict(list)
     for idx, (u, v) in enumerate(node_list):
         head_groups[v].append(idx)
+        tail_groups[u].append(idx)
 
-    # Add consistency equalities for shared heads (same distribution for each v)
+    # Consistency across all HL2 nodes sharing the same head
     for v, group in head_groups.items():
-        if len(group) > 1:
-            rep = group[0]
-            for other in group[1:]:
-                for l in range(k):
-                    const = np.zeros(num_vars)
-                    const[rep * k + l] = 1
-                    const[other * k + l] = -1
-                    A_eq.append(const)
-                    b_eq.append(0)
+        rep = group[0]
+        for other in group[1:]:
+            for l in range(k):
+                constraint = np.zeros(num_vars)
+                constraint[rep * k + l] = 1
+                constraint[other * k + l] = -1
+                A_eq.append(constraint)
+                b_eq.append(0)
 
-    # Add satisfaction equalities using constraints
-    for u, v in G.edges():
-        if (u, v) in constraints:
-            pi = constraints[(u, v)]  # pi[l] = m means if label_u = l, then label_v = m
-            if head_groups[u] and head_groups[v]:
-                rep_u = head_groups[u][0]
-                rep_v = head_groups[v][0]
-                for m in range(k):
-                    const = np.zeros(num_vars)
-                    const[rep_v * k + m] = 1  # x_v,m
-                    for l in range(k):
-                        if pi[l] == m:
-                            const[rep_u * k + l] = -1  # - sum_{l: pi(l)=m} x_u,l
-                    A_eq.append(const)
-                    b_eq.append(0)
+    # Consistency across all HL2 nodes sharing the same tail
+    for u, group in tail_groups.items():
+        rep = group[0]
+        for other in group[1:]:
+            for l in range(k):
+                constraint = np.zeros(num_vars)
+                constraint[rep * k + l] = 1
+                constraint[other * k + l] = -1
+                A_eq.append(constraint)
+                b_eq.append(0)
 
     bounds = [(0, 1) for _ in range(num_vars)]
 
     result = linprog(c, A_eq=A_eq, b_eq=b_eq, bounds=bounds, method='highs')
 
     Phi = {}
+    lp_value = 0.0
+
     if result.success:
-        x = result.x
+        x_vec = result.x
         for i in range(n):
-            label_vals = x[i * k:(i + 1) * k]
+            label_vals = x_vec[i * k:(i + 1) * k]
             best_label = int(np.argmax(label_vals))
             Phi[node_list[i]] = best_label
-    else:
-        # If infeasible, assign random labels
-        for i in range(n):
-            Phi[node_list[i]] = random.randint(0, k-1)
 
-    return Phi
+        # Compute LP objective: fractional satisfaction of projection constraints
+        satisfied = 0
+        total = 0
+        for u, v in G.edges():
+            if (u, v) in constraints:
+                pi = constraints[(u, v)]
+                u_idx = next((i for i, (a, _) in enumerate(node_list) if a == u), None)
+                v_idx = next((i for i, (_, b) in enumerate(node_list) if b == v), None)
+                if u_idx is not None and v_idx is not None:
+                    for l in range(k):
+                        m = pi[l]
+                        satisfied += x_vec[u_idx * k + l] * x_vec[v_idx * k + m]
+                    total += 1
+        if total > 0:
+            lp_value = satisfied / total
+    else:
+        for i in range(n):
+            Phi[node_list[i]] = random.randint(0, k - 1)
+        lp_value = 0.0
+
+    return Phi, lp_value
 
 # Step 5: Majority decode with fallback
 def majority_decode(HL2, phi, G, k):
@@ -134,20 +147,3 @@ def majority_decode(HL2, phi, G, k):
             decoded[v] = np.random.randint(k)
     return decoded
 
-# Step 6: Run the experiment
-n, d, k, epsilon, seeds = 100, 7, 5, 0.49, 5
-results = []
-
-for seed in range(seeds):
-    G = nx.random_regular_graph(d, n, seed=seed)
-    phi = {v: i for i, v in enumerate(G.nodes())}
-    HL2 = build_HL2_explicit(G, phi)
-    labeling, constraints = generate_label_cover_fixed(G, k, epsilon, seed_val=seed)
-    val_planted = evaluate_val_G(G, labeling, constraints)
-    lp_phi = approximate_lp_phi(HL2, constraints, k, G)  # Pass G as well
-    decoded = majority_decode(HL2, lp_phi, G, k)
-    val_decoded = evaluate_val_G(G, decoded, constraints)
-    results.append((val_planted, val_decoded))
-
-# Show the mean planted and decoded values
-print(np.round(np.mean(results, axis=0), 4))
