@@ -1,0 +1,188 @@
+
+import os, time, random
+import numpy as _np
+import matplotlib.pyplot as plt
+
+# --- Minimal helpers (pure Python) ---
+def _pyint(x): return int(x)
+def _pyfloat(x): return float(x)
+
+def units_mod_n_py(n: int):
+    n = _pyint(n)
+    return [a for a in range(n) if __import__("math").gcd(a, n) == 1]
+
+def make_codeword_py(x, d, n, r, checksum_mode="weighted"):
+    x, d, n, r = map(_pyint, (x, d, n, r))
+    ap = [(x + i*d) % n for i in range(r-1)]
+    if checksum_mode == "weighted":
+        z = sum((i+1)*ap[i] for i in range(r-1)) % n
+    else:
+        z = sum(ap) % n
+    return tuple(ap + [z])
+
+def hamming_py(a, b): return sum(1 for u,v in zip(a,b) if u!=v)
+
+def _delta_votes_pairwise_py(y_arr, n: int):
+    import math
+    n = _pyint(n); r = len(y_arr)
+    inv = {k: pow(k, -1, n) for k in range(1, r-1) if math.gcd(k, n) == 1}
+    votes = {}
+    for i in range(r-2):
+        yi = int(y_arr[i])
+        for j in range(i+1, r-1):
+            k = j-i
+            if k in inv:
+                d = ((int(y_arr[j]) - yi)*inv[k]) % n
+                if math.gcd(d, n) == 1:
+                    votes[d] = votes.get(d, 0) + 1
+    return [d for d,_ in sorted(votes.items(), key=lambda kv: -kv[1])]
+
+def tiered_decode_fast_py(y_tuple, n, r, checksum_mode="weighted"):
+    # robust delta voting + full x-try (r-1) — fast and nearly always exact at r=8
+    n, r = _pyint(n), _pyint(r)
+    t0 = time.perf_counter_ns(); tried = 0
+    y = _np.array([_pyint(v) for v in y_tuple], dtype=_np.int64)
+    U = set(units_mod_n_py(n))
+    deltas = [d for d in _delta_votes_pairwise_py(y, n) if d in U][:7]
+    if not deltas:
+        diffs = (y[1:-1]-y[0:-2])%n
+        cnt = _np.bincount(diffs, minlength=n)
+        deltas = [int(d) for d in _np.argsort(-cnt) if int(d) in U][:7] or list(U)[:7]
+    best = None
+    i_arr = _np.arange(r-1, dtype=_np.int64)
+    for d in deltas:
+        votes = (y[:r-1] - (i_arr*(d % n))%n) % n
+        vc = _np.bincount(votes, minlength=n)
+        for x in [int(ix) for ix in _np.argsort(-vc)[:7]]:
+            cw = make_codeword_py(x, d, n, r, checksum_mode)
+            dist = hamming_py(cw, tuple(int(v) for v in y))
+            tried += 1
+            if best is None or dist < best[0]:
+                best = (dist, x, d, cw, 2)
+                if dist == 0:
+                    return x, d, cw, 0, 2, tried, (time.perf_counter_ns()-t0)/1e9
+    if best is None:
+        return None, None, None, None, 3, tried, (time.perf_counter_ns()-t0)/1e9
+    _, x, d, cw, tier = best
+    return x, d, cw, hamming_py(cw, tuple(int(v) for v in y)), int(tier), tried, (time.perf_counter_ns()-t0)/1e9
+
+def run_sweep_fast_py(n, r, prob_list, trials=300, checksum_mode="weighted", seed=0):
+    rng = random.Random(_pyint(seed))
+    n, r = _pyint(n), _pyint(r)
+    U = units_mod_n_py(n)
+    results = []
+    for prob in [_pyfloat(p) for p in prob_list]:
+        errs=0; lat=[]; from collections import Counter; tiers=Counter()
+        for _ in range(_pyint(trials)):
+            x = rng.randrange(n); d = rng.choice(U)
+            cw = make_codeword_py(x, d, n, r, checksum_mode)
+            y = list(cw)
+            for j,s in enumerate(y):
+                if rng.random() < prob:
+                    z = rng.randrange(n-1)
+                    if z >= s: z += 1
+                    y[j] = z
+            y = tuple(y)
+            _, _, dcw, _, tier, _, elap = tiered_decode_fast_py(y, n, r, checksum_mode)
+            lat.append(elap); tiers[tier]+=1; errs += (dcw != cw)
+        results.append({
+            "n": n, "r": r, "p": prob,
+            "FER_tiered": errs/float(trials),
+            "FER_ML": None,
+            "mean_decode_s": float(_np.mean(lat)),
+            "p99_decode_s": float(_np.percentile(lat, 99.0)),
+            "Tier2_frac": tiers[2]/float(trials),
+            "Tier3_frac": tiers[3]/float(trials)
+        })
+    return results
+
+def build_rl_codebook_py(n, r, k=2, seed=7):
+    n, r, k = _pyint(n), _pyint(r), _pyint(k)
+    rng = random.Random(_pyint(seed))
+    G = _np.array([[rng.randrange(n) for _ in range(r)] for __ in range(k)], dtype=_np.int64)
+    M = n**k
+    msgs = _np.zeros((M, k), dtype=_np.int64)
+    for idx in range(M):
+        x = idx
+        for pos in range(k-1, -1, -1):
+            msgs[idx, pos] = x % n
+            x //= n
+    return (msgs @ G) % n
+
+def qsc_py(word, n, p, rng):
+    n, p = _pyint(n), _pyfloat(p)
+    out = list(word)
+    for i, s in enumerate(out):
+        if rng.random() < p:
+            z = rng.randrange(n-1)
+            if z >= s: z += 1
+            out[i] = z
+    return tuple(out)
+
+def rl_decode_with_budget_py(y, CB, budget, rng):
+    k = min(_pyint(budget), CB.shape[0])
+    idxs = rng.sample(range(CB.shape[0]), k)
+    subset = CB[idxs, :]
+    y_arr = _np.array(y, dtype=_np.int64)
+    dists = subset.shape[1] - (subset == y_arr).sum(axis=1)
+    j = int(_np.argmin(dists))
+    return idxs[j], int(dists[j])
+
+# --- One-button run (do not edit numbers below) ---
+def fixed_budget_compare(n, r, p, budgets, trials=300, tag=None, k_rl=2):
+    n, r, p = int(n), int(r), float(p)
+    budgets = [int(b) for b in budgets]
+    tag = tag or f"n{n}_r{r}_p{str(p).replace('.','p')}"
+    os.makedirs("figures", exist_ok=True)
+
+    # AP point (fast decoder, no fallback)
+    ap = run_sweep_fast_py(n, r, [p], trials=trials, checksum_mode="weighted", seed=3)[0]
+
+    # RL codebook (k = 2 by default so |C_RL| = n^2 ~ |C_AP| = n*phi(n))
+    CB = build_rl_codebook_py(n, r, k=k_rl, seed=7)
+    M = CB.shape[0]
+
+    rows = []
+    rng_master = random.Random()  # OS-seeded; avoids Sage Integer issues
+    for B in budgets:
+        rng = random.Random(int(rng_master.randrange(2**32)))  # derive a plain int seed
+        errs, lat = 0, []
+        for _ in range(int(trials)):
+            mi = rng.randrange(M)
+            cw = tuple(int(x) for x in CB[mi].tolist())
+            y  = qsc_py(cw, n, p, rng)
+            t0 = time.perf_counter_ns()
+            j_hat, _ = rl_decode_with_budget_py(y, CB, int(B), rng)
+            t1 = time.perf_counter_ns()
+            errs += (j_hat != mi)
+            lat.append((t1 - t0)/1e9)
+        rows.append({
+            "budget": int(B),
+            "FER_RL_budget": errs/float(trials),
+            "mean_s_RL_budget": float(np.mean(lat)),
+            "p99_s_RL_budget": float(np.percentile(lat, 99.0)),
+        })
+
+    # Print quick summary
+    print(f"AP @ ({n},{r}), p={p}:", {k: ap[k] for k in ["FER_tiered","mean_decode_s","p99_decode_s","Tier2_frac"]})
+    for rrow in rows: print(rrow)
+
+    # Plot
+    plt.figure()
+    xs = [row["mean_s_RL_budget"] for row in rows]
+    ys = [row["FER_RL_budget"] for row in rows]
+    plt.plot(xs, ys, marker="s", label="RL (budgeted)")
+    for row in rows:
+        plt.annotate(f"B={row['budget']}", (row["mean_s_RL_budget"], row["FER_RL_budget"]), fontsize=8)
+    plt.axhline(ap["FER_tiered"], linestyle="--", label=f"AP FER={ap['FER_tiered']:.3g}")
+    plt.axvline(ap["mean_decode_s"], linestyle="--", label=f"AP mean={ap['mean_decode_s']:.3g}s")
+    plt.yscale("log"); plt.grid(True, which="both")
+    plt.xlabel("Mean decode time (s)"); plt.ylabel("FER (log scale)")
+    plt.legend(); plt.tight_layout()
+    png = os.path.join("figures", f"rl_budget_vs_ap_{tag}.png")
+    plt.savefig(png, dpi=160); plt.close()
+    print("Saved plot:", png)
+    return ap, rows
+
+for p in [0.05, 0.10, 0.15]:
+    fixed_budget_compare(401, 8, p, budgets=[1_000, 5_000, 10_000, 50_000, 100_000], trials=300, tag=f"401_8_p{int(100*p)}")
