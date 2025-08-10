@@ -1,0 +1,161 @@
+from typing import Tuple, Dict, Any, List, Optional
+import math, random
+import numpy as _np
+
+# ---------- Safe casts ----------
+def _pi(x): return int(x)
+def _pf(x): return float(x)
+
+# ---------- Number theory helpers ----------
+def phi_euler_py(n: int) -> int:
+    n = _pi(n)
+    m, res = n, n
+    p = 2
+    while p * p <= m:
+        if m % p == 0:
+            while m % p == 0:
+                m //= p
+            res -= res // p
+        p += 1
+    if m > 1:
+        res -= res // m
+    return _pi(res)
+
+_UNITS_CACHE_DMIN: Dict[int, List[int]] = {}
+def units_mod_n_py(n: int) -> List[int]:
+    n = _pi(n)
+    U = _UNITS_CACHE_DMIN.get(n)
+    if U is None:
+        U = [a for a in range(n) if math.gcd(a, n) == 1]
+        _UNITS_CACHE_DMIN[n] = U
+    return U
+
+# ---------- Code definition ----------
+def checksum_symbol_py(ap_vals: List[int], n: int, mode: str="weighted") -> int:
+    n = _pi(n)
+    if mode == "sum":
+        z = 0
+        for a in ap_vals: z = (z + _pi(a)) % n
+        return _pi(z)
+    elif mode == "weighted":
+        z = 0
+        for i, a in enumerate(ap_vals): z = (z + (i+1)*_pi(a)) % n
+        return _pi(z)
+    raise ValueError("checksum_mode must be 'weighted' or 'sum'")
+
+def make_codeword_py(x: int, d: int, n: int, r: int, checksum_mode: str="weighted") -> Tuple[int,...]:
+    x, d, n, r = map(_pi, (x, d, n, r))
+    ap = [(x + i*d) % n for i in range(r-1)]
+    z  = checksum_symbol_py(ap, n, checksum_mode)
+    return tuple(ap + [z])
+
+def hamming_py(a: Tuple[int,...], b: Tuple[int,...]) -> int:
+    return sum(1 for u,v in zip(a,b) if u != v)
+
+# ---------- Exact (blockwise) scan ----------
+def _build_codebook_array_py(n: int, r: int, checksum_mode: str="weighted") -> Tuple[_np.ndarray, List[Tuple[int,int]]]:
+    n, r = _pi(n), _pi(r)
+    U = units_mod_n_py(n)
+    M = n * len(U)
+    arr = _np.empty((M, r), dtype=_np.int32)
+    keys: List[Tuple[int,int]] = []
+    k = 0
+    for d in U:
+        for x in range(n):
+            arr[k, :] = make_codeword_py(x, d, n, r, checksum_mode)
+            keys.append((_pi(x), _pi(d)))
+            k += 1
+    return arr, keys
+
+def _dmin_exact_block_scan(arr: _np.ndarray, block: int=2048) -> Tuple[int, Tuple[int,int]]:
+    M, r = arr.shape
+    dmin = r + 1
+    w = (0, 1)
+    for a0 in range(0, M, block):
+        a1 = min(M, a0 + block)
+        A = arr[a0:a1]
+        for b0 in range(a0, M, block):
+            b1 = min(M, b0 + block)
+            B = arr[b0:b1]
+            eq_counts = _np.zeros((A.shape[0], B.shape[0]), dtype=_np.int16)
+            for j in range(r):
+                eq_counts += (A[:, j][:, None] == B[:, j][None, :])
+            dists = r - eq_counts
+            if a0 == b0:
+                tri = _np.triu(_np.ones_like(dists, dtype=bool), k=1)
+                if tri.any():
+                    local = int(dists[tri].min())
+                    if local < dmin:
+                        ii = _np.argwhere((dists == local) & tri)[0]
+                        i, j = int(ii[0]), int(ii[1])
+                        dmin, w = local, (a0 + i, b0 + j)
+            else:
+                local = int(dists.min())
+                if local < dmin:
+                    i, j = _np.unravel_index(int(_np.argmin(dists)), dists.shape)
+                    dmin, w = local, (a0 + int(i), b0 + int(j))
+            if dmin == 0:
+                return dmin, w
+    return int(dmin), (int(w[0]), int(w[1]))
+
+# ---------- Sampled (on-the-fly) pairs ----------
+def _dmin_sampled_pairs_py(n: int, r: int, checksum_mode: str, samples: int=200_000, seed: Optional[int]=0) -> Dict[str,Any]:
+    n, r, samples = _pi(n), _pi(r), _pi(samples)
+    U = units_mod_n_py(n)
+    M = n * len(U)
+    rng = random.Random(_pi(0 if seed is None else seed))
+    dmin, wi, wj = r + 1, (0,1), (0,2)
+    cw_i, cw_j = None, None
+    for _ in range(samples):
+        x1 = rng.randrange(n); d1 = rng.choice(U)
+        x2 = rng.randrange(n); d2 = rng.choice(U)
+        if x1 == x2 and d1 == d2: 
+            continue
+        c1 = make_codeword_py(x1, d1, n, r, checksum_mode)
+        c2 = make_codeword_py(x2, d2, n, r, checksum_mode)
+        dist = hamming_py(c1, c2)
+        if dist < dmin:
+            dmin = dist; wi = (x1, d1); wj = (x2, d2); cw_i, cw_j = c1, c2
+            if dmin <= 1: break
+    if cw_i is None:
+        # extremely unlikely; return any example
+        cw_i = make_codeword_py(0, U[0], n, r, checksum_mode)
+        cw_j = make_codeword_py(1, U[0], n, r, checksum_mode)
+        wi, wj = (0,U[0]), (1,U[0])
+        dmin = hamming_py(cw_i, cw_j)
+    matches = [t for t,(a,b) in enumerate(zip(cw_i, cw_j)) if a == b]
+    return {
+        "mode": f"sampled({samples})", "M": _pi(M), "d_min": _pi(dmin),
+        "witness_idx": None,
+        "witness_keys": ((_pi(wi[0]), _pi(wi[1])), (_pi(wj[0]), _pi(wj[1]))),
+        "cw_i": tuple(int(x) for x in cw_i),
+        "cw_j": tuple(int(x) for x in cw_j),
+        "matches": matches
+    }
+
+# ---------- Public API ----------
+def certify_dmin_py(n: int, r: int, checksum_mode: str="weighted",
+                    exact_cap: int=120_000, samples: int=200_000, seed: int=0,
+                    force_mode: Optional[str]=None) -> Dict[str, Any]:
+    """
+    If M = n*phi(n) <= exact_cap and force_mode != 'sampled', do exact blockwise scan.
+    Otherwise do sampled on-the-fly pairs.
+    Set force_mode to 'exact' or 'sampled' to override.
+    """
+    n, r = _pi(n), _pi(r)
+    M = n * phi_euler_py(n)
+    if (force_mode == "exact") or (force_mode is None and M <= _pi(exact_cap)):
+        arr, keys = _build_codebook_array_py(n, r, checksum_mode)
+        dmin, (i, j) = _dmin_exact_block_scan(arr)
+        cw_i = tuple(int(x) for x in arr[i].tolist())
+        cw_j = tuple(int(x) for x in arr[j].tolist())
+        matches = [t for t,(a,b) in enumerate(zip(cw_i, cw_j)) if a == b]
+        return {
+            "mode": "exact", "M": _pi(M), "d_min": _pi(dmin),
+            "witness_idx": (_pi(i), _pi(j)),
+            "witness_keys": (tuple(int(x) for x in keys[i]), tuple(int(x) for x in keys[j])),
+            "cw_i": cw_i, "cw_j": cw_j, "matches": matches
+        }
+    else:
+        return _dmin_sampled_pairs_py(n, r, checksum_mode, samples=_pi(samples), seed=_pi(seed))
+print("257,8 =>", certify_dmin_py(257, 8, exact_cap=10_000_000))
